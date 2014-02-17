@@ -17,15 +17,22 @@
 package net.openhft.lang.io;
 
 import net.openhft.lang.Maths;
+import net.openhft.lang.io.examples.OffHeapDataStructure;
 import net.openhft.lang.thread.NamedThreadFactory;
+
 import org.junit.Before;
 import org.junit.Test;
+
 import sun.nio.ch.DirectBuffer;
 
 import java.io.*;
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.math.BigDecimal;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.file.FileSystem;
+import java.nio.file.FileSystems;
 import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.concurrent.*;
@@ -51,7 +58,378 @@ public class NativeBytesTest {
         long addr = ((DirectBuffer) byteBuffer).address();
         bytes = new NativeBytes(addr, addr, addr + SIZE);
     }
+    
+    @Test
+    /*
+     * Using Unsafe, hint: NativeBytes.UNSAFE makes it available, find where in the header 
+     * of an object the default hashCode() is stored. How can you detect if the hashCode has 
+     * been generated and how can you change it to say 0x12345678.
+     * */
+    public void testSetObjectHashCode()
+    {    	
+    	//NativeBytes.UNSAFE
+    	FileSystem fileSysObj = FileSystems.getDefault();
+    	
+    	//Since object header is 8-byte aligned and its first 4-bytes contains its hashCode()  using Unsafe.getInt(obj, int)
+    	//getting default hashCode()
+    	int dHc = NativeBytes.UNSAFE.getInt(fileSysObj, 1);
+    	if (dHc ==0){fileSysObj.hashCode(); dHc = NativeBytes.UNSAFE.getInt(fileSysObj, 1);}
+    	System.out.println("default hascode value = "+dHc);
+    	
+    	//trying to set new hashcode
+    	NativeBytes.UNSAFE.putInt(fileSysObj, 1, 0x12345678);
+    	
+    	//new dHc value
+    	dHc = NativeBytes.UNSAFE.getInt(fileSysObj, 1);
+    	System.out.println("New hashcode value after setting to 0x123456 is "+ dHc);
 
+    	// converting to hex value    	
+    	System.out.println(" New dHc hex value "+ Integer.toHexString(dHc)); 		
+    	
+    	
+    	/*
+    	 * OUTPUT:
+    	 * 	default hascode value = 584912775
+			New hashcode value after setting to 0x123456 is 305419896
+ 			New dHc hex value 12345678
+    	 * 
+    	 * */
+    } 
+    
+    @Test
+    /*
+     * Use allocateMemory to allocate some memory.  
+     * One million, double values to it and check you can get those values back 
+     * and free() the memory.
+     * */
+    public void testDoubleAllocateMemoryCheck()
+    {
+    	int doubleOffset = 8;//for double size
+    	
+    	//setting the count to 1mn    	
+    	int TOTAL_SIZE = 1000000;
+    	long address = NativeBytes.UNSAFE.allocateMemory(doubleOffset * TOTAL_SIZE);
+    	long currentMemoryPosition = address;
+    	
+    	for (double d=0.0d; d<TOTAL_SIZE ;d +=1.0d)
+		{
+    		//calculate  
+    		//currentMemoryPosition = address + ((long)d * 8 * 1L);
+    		
+    		NativeBytes.UNSAFE.putDouble(currentMemoryPosition , d);
+    		currentMemoryPosition +=8;
+			System.out.println(d);
+		}
+    	
+    	//reading back  
+    	currentMemoryPosition = address; 
+    	for (double d=0.0d; d<TOTAL_SIZE ;d +=1.0d)
+		{
+    		//currentMemoryPosition = address + ((long)d * 8 * 1L);
+    		
+    		System.out.println(NativeBytes.UNSAFE.getDouble(currentMemoryPosition ));	
+    		currentMemoryPosition +=8;
+		}
+    	
+    	//free the memory now by setting all the range to ZERO
+    	NativeBytes.UNSAFE.setMemory(address, doubleOffset * TOTAL_SIZE, (byte)0);
+    	
+    	//Checking if the memory range is set to ZERO  
+    	currentMemoryPosition = address; 
+    	for (double d=0.0d; d<TOTAL_SIZE ;d +=1.0d)
+		{
+    		//currentMemoryPosition = address + ((long)d * 8 * 1L);
+    		
+    		System.out.println(NativeBytes.UNSAFE.getDouble(currentMemoryPosition ));
+    		currentMemoryPosition +=8;
+		}
+    	
+    }
+    
+    @Test
+    /*
+     * Create an array of Object[] with 16 objects.  Show that the addresses of these objects 
+     * are in order in memory.  Perform a System.gc() and show they are in reverse order now.  
+     * Create a new Object[] and show that after another GC the addresses can be the same 
+     * i.e. at the bottom of the heap.  Try this with a 1 GB heap and a 4 GB heap.  
+     * How are the references different. i.e. what is the spacing between addresses.
+     * */
+    
+    // have tried many different objects, I realized that Runtime doesnt return the freeMemory immediately
+    public void testObjectHeapAddress() //throws Exception
+    {
+    	
+    	Object [] heapObjects = createObjArray(16);
+    	testPrintArrayElementAddress(heapObjects);
+    	System.gc();
+    	testPrintArrayElementAddress(heapObjects);
+    	
+    	Object [] heapObjects_2 = createObjArray(16);
+    	testPrintArrayElementAddress(heapObjects_2);
+    	System.gc();
+    	testPrintArrayElementAddress(heapObjects_2);
+    	
+     } 
+    
+    public Object[] createObjArray(int size)
+    {
+    	Object [] heapObjects = new Object[16];    	
+    	Object obj = null;
+    	
+    	for (int i=0; i<heapObjects.length;i++)
+    	{
+			//obj = new Object(); obj.hashCode();
+    		obj = new Date(); ((Date)obj).setTime(System.nanoTime());
+			heapObjects[i] = obj;
+      	}
+    	
+    	return heapObjects;
+    }
+  
+    public void testPrintArrayElementAddress(Object [] heapObjects)
+    {
+       //gets the base offset for this Object[] of Object
+	   int heapObjectArrayOffSet = NativeBytes.UNSAFE.arrayBaseOffset(heapObjects.getClass());
+		System.out.println(" heapObjectArrayOffSet --> "+ heapObjectArrayOffSet);
+		
+		//to know the native pointer size for calculating correct addr location.
+		long addrSize = NativeBytes.UNSAFE.addressSize();
+		System.out.println("addrSize --> "+addrSize);
+		
+		long objectLocation = 0L;
+		long locationOffset = 0L;
+   	
+	   for (int i=0; i<heapObjects.length;i++)
+   		{ 		
+           if (addrSize ==4 )
+           {
+           	objectLocation = NativeBytes.UNSAFE.getInt(heapObjects, heapObjectArrayOffSet + locationOffset);
+           }
+           else if (addrSize ==8)
+           {
+           	objectLocation = NativeBytes.UNSAFE.getLong(heapObjects, heapObjectArrayOffSet + locationOffset );
+           }  
+           //considering 4-byte obj size
+           locationOffset += 4;
+                                  
+           System.out.println(" locationOffset --> "+locationOffset +", objectLocation "+Long.toHexString(objectLocation));
+              		
+   		}
+    }
+    
+    
+    /**
+     * Create some off heap memory and use the compareAndSwap to change the value from 0 to 1 
+     * in one thread and 1 to 0 in another thread.  Time how long this takes on average over 2 seconds.
+     * */
+    @Test
+    public void testCompareAndSwapDifferentThreads()
+    {
+    	ExecutorService execService =  Executors.newFixedThreadPool(2);
+    	
+    	int intSize = 4;
+        long startMemIndex = NativeBytes.UNSAFE.allocateMemory(intSize);
+        System.out.println("ss --> "+startMemIndex);
+        
+        //sets this int to ZERO.
+        NativeBytes.UNSAFE.setMemory(startMemIndex, intSize, (byte)0);
+        
+        int iterations = 1000000;
+        MyThreadObject [] thObj = new MyThreadObject[]{new MyThreadObject(iterations), new MyThreadObject(iterations)};
+              
+        startime = System.nanoTime();
+        thObj[0].setValues(startMemIndex, 1, 0);
+        execService.execute(thObj[0]);
+              
+        thObj[1].setValues(startMemIndex, 0, 1);
+        execService.execute(thObj[1]);
+        //thObj[1].run();
+        
+        /*startime = System.nanoTime();
+        for (int i=0;i< iterations;i++)
+        {
+        	NativeBytes.UNSAFE.compareAndSwapInt(null, startMemIndex, 0, 1);
+            NativeBytes.UNSAFE.compareAndSwapInt(null, startMemIndex, 1, 0);
+            
+        }  
+        long totaltime = System.nanoTime() - startime;
+        System.out.println("Total time per iteration " + totaltime/(iterations));   //about 40nsper iterations  
+        */       
+    }
+    
+    long endtime = 0;
+    long startime =0;
+      
+    private class MyThreadObject implements Runnable {
+        
+    	private long startMemIndex;
+    	private int expected;
+    	private int x;
+    	private int iterations;
+    	private boolean threadup = false;
+    	
+    	public MyThreadObject(int iterations){this.iterations = iterations;}
+    	
+    	public void setValues(long startMemIndex, int expected, int x)
+    	{
+    		this.startMemIndex = startMemIndex;
+    		this.expected = expected;
+    		this.x = x;
+    	}
+    	@Override
+        public void run() 
+    	{            
+            try 
+            {
+            	for (int i=0;i< iterations;i++)
+            	{
+            		NativeBytes.UNSAFE.compareAndSwapInt(null, startMemIndex, expected, x);
+            		System.out.println(NativeBytes.UNSAFE.getInt(startMemIndex));
+            	}
+            	
+            	if (endtime !=0 && endtime < System.nanoTime())
+            	{
+            		long totaltime = System.nanoTime() - startime;
+        	        System.out.println("Total time per iteration " + totaltime/(iterations*1000));//about 267 us per iteration        	        
+            	}else 
+            	{
+            		endtime = System.nanoTime();
+            	}
+            	
+            } catch (Exception e) {
+            	e.printStackTrace();
+            } 
+        }
+    } 
+    
+    public long objectSize(Object obj)
+    {
+    	Class cls = obj.getClass();
+    	long classMaxOffset = 0;
+    	
+    	//taking all fields
+    	while ( (cls =cls.getSuperclass()) != null )
+    	{
+	    	for (Field field : cls.getDeclaredFields())
+	    	{
+	    		System.out.println(" Field ");
+	    		if ((field.getModifiers() & Modifier.STATIC) == 0)//taking non-static fields  
+	    		{
+	    			//getting maximum offset of the fields in object. Making sure its highest address
+	    			classMaxOffset = Math.max(classMaxOffset, NativeBytes.UNSAFE.objectFieldOffset(field));
+	    		}
+	    	}
+    	}
+    	
+    	/*if (classMaxOffset % 8 !=0 )
+    	{
+    		classMaxOffset  = classMaxOffset + 1;
+    	}*/
+    	System.out.println(classMaxOffset);
+    	return classMaxOffset +8;//adding to accomodate largest possible primitive
+    }
+    
+    
+    /*
+     * Create a getter/setter interface which has five fields. 
+     * A double, long, int, char and byte. Create an implmentation 
+     * which takes an address and maps those fields to the address. 
+     * i.e. if an off heap data structure.  Allocate enough memory 
+     * for one million of these and create an Array type for it. 
+     * Set one million records and check they store all the information.  
+     * Ensure only a few objects are created ever. How long does it take 
+     * to set and check one million records?
+     * 
+     * 
+     * */
+    public void testOffHeapDataStructure()
+    {
+    	int iterations = 10000000;
+    	OffHeapDataStructure offHeapObj = new OffHeapDataStructure(iterations); 
+    	testWriteOffHeapDS(offHeapObj, iterations, false);
+    	testReadOffHeapDS(offHeapObj, iterations);
+    	
+    	testWriteOffHeapDS(offHeapObj, iterations, true);
+    	testReadOffHeapDS(offHeapObj, iterations);
+    	
+    	/**
+    	 * with int iterations = 10000000;
+    	 * Without compareAndSwap
+    	 * First iteration took about 0.57 seconds for writing while later iterations took avg. 0.24s 
+    	 * Reading took about 0.04s on avg.
+    	 * Writing with lock--compareAndSwapInt() is 1.39s avg.
+    	 * */
+    	
+    }
+    
+    public void testWriteOffHeapDS(OffHeapDataStructure offHeapObj, int iterations, boolean islock)
+    {	
+    	double d = 20.0d;
+    	long start = System.nanoTime();
+    	for(int i=0;i<iterations;i++)
+		{
+    		offHeapObj.calculatePosition(i);
+    		offHeapObj.setDouble(d);
+    		offHeapObj.setLong((long)d);
+    		offHeapObj.setInt((int)d, islock);
+    		offHeapObj.setChar((char)d);
+    		offHeapObj.setByte((byte)d);			
+		}
+    	long timeTaken = System.nanoTime()-start;
+    	System.out.println("Time taken to write in seconds "+ timeTaken/1e9);
+    	
+    }
+    
+    public void testReadOffHeapDS(OffHeapDataStructure offHeapObj, int iterations)
+    {
+    	long start = System.nanoTime();
+    	for(int i=0;i<iterations;i++)
+		{    		
+    		offHeapObj.calculatePosition(i);
+    		offHeapObj.getByte();
+    		offHeapObj.getChar();
+    		offHeapObj.getInt();
+    		offHeapObj.getLong();
+    		offHeapObj.getDouble();
+		}
+    	long timeTaken = System.nanoTime()-start;
+    	System.out.println("Time taken to read in seconds "+ timeTaken/1e9 );    	
+    }
+    
+    
+    public static void main(String ...args)
+    {
+    	NativeBytesTest nBt = new NativeBytesTest();
+    	//nBt.testSetObjectHashCode();
+    	//nBt.testDoubleAllocateMemoryCheck();
+    	//nBt.testObjectHeapAddress();
+    	//nBt.testCompareAndSwapDifferentThreads();
+    	//nBt.testOffHeapDataStructure();
+    	nBt.checkTwosComplement();
+    }
+    
+    /*
+     * Research Item 
+     * Find all the types and values where x == -x  
+     * */
+    public void checkTwosComplement()
+    {
+    	int iterations = 1000000;
+    	for (int i=0;i<iterations;i++)
+    	{
+    		if (i == getTwosComplement(i) )
+    		//if ((i & getTwosComplement(i)) == i ) --> only power of 2s
+    		{
+    			System.out.println(i);
+    		}
+    	}
+    }
+    
+    public static int getTwosComplement(int intValue)
+	{
+		return intValue = ~intValue +1;
+	}
+    
     @Test
     public void testLongHash() throws Exception {
         byte[] bytes = {1, 2, 3, 4, 5, 6, 7, 8};
